@@ -1,0 +1,8 @@
+mss>=9.0
+Pillow>=10.0
+requests>=2.31
+psutil>=5.9
+pystray>=0.19
+keyboard>=0.13
+# 可选：DXGI 截图后端，4K 下更省 CPU
+# dxcam>=0.0.5

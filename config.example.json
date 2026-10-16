@@ -1,0 +1,17 @@
+{
+  "server_url": "https://your-server.example.com/companion/v1",
+  "token": "从服务端 companion/config.json 取得，也可用环境变量 COMPANION_TOKEN",
+  "source": "pc/monitor1",
+  "monitor": 1,
+  "backend": "mss",
+  "capture_area": "window",
+  "allow_processes": [],
+  "deny_processes": [
+    "WeChat.exe", "Weixin.exe", "QQ.exe", "Feishu.exe", "Lark.exe", "Telegram.exe", "Discord.exe",
+    "DingTalk.exe", "Outlook.exe", "olk.exe", "KeePass.exe", "KeePassXC.exe", "1Password.exe",
+    "Bitwarden.exe", "mstsc.exe"
+  ],
+  "hotkey_look": "ctrl+alt+s",
+  "hotkey_pause": "ctrl+alt+p",
+  "proxy": ""
+}
