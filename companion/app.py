@@ -124,9 +124,13 @@ class Companion:
         self.paused = not self.paused
         self._set_status("本机已暂停截图" if self.paused else "已恢复")
 
+    def _accept_state(self, state: dict) -> None:
+        self.state = state
+        self.decider.update_state(time.monotonic(), state)
+
     def control(self, action: str) -> None:
         try:
-            self.state = self.api.control(action)
+            self._accept_state(self.api.control(action))
             self._set_status(self._describe())
         except Exception as exc:
             self._set_status(f"操作失败：{type(exc).__name__}")
@@ -152,7 +156,7 @@ class Companion:
 
     def _poll_state(self) -> None:
         try:
-            self.state = self.api.state()
+            self._accept_state(self.api.state())
             self._set_status(self._describe())
         except Exception as exc:
             self._set_status(f"连不上服务器：{type(exc).__name__}")
@@ -200,7 +204,7 @@ class Companion:
         params = self.state.get("client") or {}
         jpeg = encode_jpeg(image, int(params.get("max_width", 1600)), int(params.get("jpeg_quality", 70)))
         result = self.api.upload(jpeg, trigger, change, fg.title, float(params.get("upload_kbps", 1500)))
-        self.state = result.get("state") or self.state
+        self._accept_state(result.get("state") or self.state)
         self.decider.uploaded(time.monotonic(), thumb, result.get("frame_ts"), trigger)
         self.stats["uploads"] += 1
         self.stats["bytes"] += len(jpeg)

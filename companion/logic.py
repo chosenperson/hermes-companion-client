@@ -51,7 +51,12 @@ class Decider:
     last_upload_server_ts: float = 0.0
     last_thumb: Any = None
     hotkey_pending: bool = False
+    quiet_until: float = 0.0
     history: list = field(default_factory=list)
+
+    def update_state(self, now: float, state: dict) -> None:
+        """服务端告知接下来多少秒不会看自动上传的图（冷却/判断间隔/用户正在聊）。"""
+        self.quiet_until = now + float(state.get("quiet_for_s") or 0)
 
     def decide(self, now: float, state: dict, change: float) -> str | None:
         params = state.get("client") or {}
@@ -61,6 +66,8 @@ class Decider:
             return "hotkey"
         if float(state.get("want_frame_after") or 0) > self.last_upload_server_ts:
             return "request"
+        if now < self.quiet_until:
+            return None  # 服务端此时用不上，省流量
         since = now - self.last_upload if self.last_upload else float("inf")
         if state.get("mode") == "passive":
             interval = float(params.get("passive_upload_s", 60))

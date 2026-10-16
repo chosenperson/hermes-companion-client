@@ -59,6 +59,16 @@ def test_decider_rules():
     assert d.decide(162, passive, 0.0) is None            # 画面没动就不传
 
 
+def test_quiet_period_skips_auto_uploads_only():
+    d = Decider()
+    d.update_state(100, dict(STATE, quiet_for_s=150))
+    assert d.decide(120, STATE, 1.0) is None              # 冷却中，变化再大也不传
+    assert d.decide(260, STATE, 1.0) == "change"          # 静默期过后恢复
+    assert d.decide(120, dict(STATE, want_frame_after=1.0), 0.0) == "request"
+    d.hotkey_pending = True
+    assert d.decide(120, STATE, 0.0) == "hotkey"
+
+
 def test_throttled_reader_paces_upload():
     slept = []
     clock = [0.0]

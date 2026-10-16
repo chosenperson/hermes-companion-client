@@ -14,7 +14,8 @@
   ├─ 变化够大且距上次上传 ≥15 秒 → 上传（change）
   ├─ 两分钟都没变化 → 兜底传一张（timer）
   ├─ 服务端请求新画面（你在手机上问了）→ 上传（request）
-  └─ 按热键 → 上传并让角色立刻说话（hotkey）
+  ├─ 按热键 → 上传并让角色立刻说话（hotkey）
+  └─ 服务端冷却/正在聊天期间（state.quiet_for_s）只响应热键和取帧请求，自动上传暂停
 上传前：裁成前台窗口 → 缩到 1600 宽 → JPEG 70 → 限速 1.5Mbps
 ```
 
@@ -89,7 +90,7 @@ copy config.example.json config.json   # 然后填写 server_url、token、monit
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/companion/v1/health` | 存活检查 |
-| GET | `/companion/v1/state` | `{enabled, mode, want_frame_after, server_time, client:{采集参数}}` |
+| GET | `/companion/v1/state` | `{enabled, mode, want_frame_after, quiet_for_s, server_time, client:{采集参数}}` |
 | POST | `/companion/v1/frame` | body 为 JPEG/PNG/WebP；头 `X-Companion-Source/Trigger/Change/Title`（Title 为 URL 编码）；返回 `{accepted, frame_ts, state}` |
 | POST | `/companion/v1/control` | `{"action": "start|stop|auto|passive"}` |
 
