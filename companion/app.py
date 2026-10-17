@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import random
 import ctypes
 from datetime import datetime
 import faulthandler
@@ -330,7 +331,7 @@ class Companion:
             log.info("陪看达到最长时长，自动结束")
             return self.control("watch_off", source="auto")
         requested = float(self.state.get("want_frame_after") or 0) > w["server_ts"]
-        due = now - w["last_upload"] >= float(params.get("watch_upload_s", 600))
+        due = not w["last_upload"] or now - w["last_upload"] >= float(w.get("next_interval") or 0)
         if now - w["last_check"] < self.watch_check_s and not requested and not due:
             return
         if is_locked(foreground()):
@@ -375,6 +376,8 @@ class Companion:
             log.warning("接收端未接受副屏截图，不计成功上传")
             return
         w["last_upload"] = now
+        spread = float(params.get("upload_jitter", 0))
+        w["next_interval"] = float(params.get("watch_upload_s", 180)) * (1 + random.uniform(-spread, spread))
         w["server_ts"] = float(result.get("frame_ts") or w["server_ts"])
         self.stats["uploads"] += 1
         self.stats["bytes"] += len(jpeg)

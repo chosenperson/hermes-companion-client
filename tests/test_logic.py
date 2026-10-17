@@ -213,3 +213,20 @@ def test_motion_metrics_ignore_small_animations_but_catch_talking_heads():
     assert change_ratio(*face) < 0.02                                             # 平均差会误判静止
     assert changed_fraction(*face) >= 0.01                                        # 面积指标认得出在播
     assert change_ratio(*spinner) < 0.12                                          # 主屏也不会因此上传
+
+
+def test_timer_intervals_are_jittered_not_mechanical():
+    params = dict(STATE["client"], timer_upload_s=120, upload_jitter=0.4)
+    state = dict(STATE, client=params)
+    waits = set()
+    for i in range(30):
+        d = Decider()
+        d.uploaded(1000, None, 1.0, "timer")
+        wait = next(t for t in range(0, 400) if d.decide(1000 + t, state, 0.0) == "timer")
+        waits.add(wait)
+        assert 120 * 0.6 - 1 <= wait <= 120 * 1.4 + 1
+    assert len(waits) > 10                                     # 每次间隔不同
+    d = Decider()
+    d.uploaded(1000, None, 1.0, "timer")
+    d.jitter_unit = 0.0
+    assert d.decide(1119, dict(STATE, client=dict(params, upload_jitter=0)), 0.0) is None   # 不抖动时仍是原间隔

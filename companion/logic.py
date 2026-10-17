@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -65,7 +66,12 @@ class Decider:
     hotkey_pending: bool = False
     quiet_until: float = 0.0
     daily_quiet_until: float = 0.0
+    jitter_unit: float = 0.0        # [-1, 1]，每次上传后重新随机，让定时间隔不那么规律
     history: list = field(default_factory=list)
+
+    def _scaled(self, params: dict, key: str, default: float) -> float:
+        spread = float(params.get("upload_jitter", 0))
+        return float(params.get(key, default)) * (1 + self.jitter_unit * spread)
 
     def update_state(self, now: float, state: dict) -> None:
         """服务端告知接下来多少秒不会看自动上传的图（冷却/判断间隔/用户正在聊）。"""
@@ -87,16 +93,16 @@ class Decider:
             return None  # 服务端此时用不上，省流量
         since = now - self.last_upload if self.last_upload else float("inf")
         if scene == "daily":
-            if change >= float(params.get("min_change", 0.12)) and since >= float(params.get("daily_min_upload_s", 300)):
+            if change >= float(params.get("min_change", 0.12)) and since >= self._scaled(params, "daily_min_upload_s", 300):
                 return "change"
-            timer = float(params.get("daily_timer_upload_s", 900))
+            timer = self._scaled(params, "daily_timer_upload_s", 900)
             return "timer" if timer and since >= timer else None
         if state.get("mode") == "passive":
-            interval = float(params.get("passive_upload_s", 60))
+            interval = self._scaled(params, "passive_upload_s", 60)
             return "timer" if interval and since >= interval and change >= 0.01 else None
         if change >= float(params.get("min_change", 0.12)) and since >= float(params.get("min_upload_interval_s", 15)):
             return "change"
-        timer = float(params.get("timer_upload_s", 120))
+        timer = self._scaled(params, "timer_upload_s", 120)
         if timer and since >= timer:
             return "timer"
         return None
@@ -108,6 +114,7 @@ class Decider:
             self.last_upload_server_ts = float(server_ts)
         if trigger == "hotkey":
             self.hotkey_pending = False
+        self.jitter_unit = random.uniform(-1, 1)
         self.history = (self.history + [(now, trigger)])[-50:]
 
 
