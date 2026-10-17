@@ -30,7 +30,8 @@ import requests
 
 from . import __version__
 from .capture import Capturer, Foreground, enable_dpi_awareness, foreground, idle_seconds, is_locked, process_at, is_shell_surface
-from .logic import (NON_GAME_PROCESSES, AutoSession, Decider, ThrottledReader, change_ratio, encode_jpeg,
+from .logic import (NON_GAME_PROCESSES, AutoSession, Decider, ThrottledReader, change_ratio, changed_fraction,
+                    encode_jpeg,
                     looks_like_game, process_allowed, thumbnail)
 
 log = logging.getLogger("companion")
@@ -355,8 +356,10 @@ class Companion:
             return  # Discard a frame taken while the center window was changing.
         thumb = thumbnail(image)
         change = change_ratio(w["thumb"], thumb)
+        moving = changed_fraction(w["thumb"], thumb)
         w.update(last_check=now, thumb=thumb)
-        if change >= 0.02:
+        # 暂停界面常有转圈/光标等小动效：按“明显在动的面积”判断是否还在播，而不是要求 100% 相同
+        if moving >= float(params.get("watch_motion_fraction", 0.01)) or change >= 0.02:
             w["last_change"] = now
         if now - w["last_change"] >= float(params.get("watch_static_stop_s", 900)):
             log.info("副屏画面长时间不动，自动结束陪看")

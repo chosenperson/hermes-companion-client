@@ -191,3 +191,25 @@ def test_decider_daily_cadence_and_absence():
     d.update_state(t, dict(daily, quiet_for_s=0, daily_quiet_for_s=2000))
     assert d.decide(t + 1000, daily, 1.0, "daily") is None        # 日常冷却中
     assert d.decide(t + 1000, daily, 1.0, "game") == "change"
+
+
+def test_motion_metrics_ignore_small_animations_but_catch_talking_heads():
+    from PIL import ImageDraw
+    from companion.logic import changed_fraction
+
+    def frame(spot=None, color="white"):
+        img = Image.new("RGB", (3840, 2160), (40, 60, 90))
+        draw = ImageDraw.Draw(img)
+        for i in range(0, 3840, 480):
+            draw.rectangle((i, 200, i + 300, 900), fill=(120 + i % 100, 80, 60))
+        if spot:
+            x, y, size = spot
+            draw.ellipse((x, y, x + size, y + size), fill=color)
+        return thumbnail(img)
+
+    spinner = (frame((1800, 1000, 120), "white"), frame((1800, 1000, 120), "black"))
+    face = (frame((1500, 600, 700), (200, 150, 120)), frame((1560, 640, 700), (150, 100, 80)))
+    assert change_ratio(*spinner) < 0.02 and changed_fraction(*spinner) < 0.01   # 暂停转圈：算静止
+    assert change_ratio(*face) < 0.02                                             # 平均差会误判静止
+    assert changed_fraction(*face) >= 0.01                                        # 面积指标认得出在播
+    assert change_ratio(*spinner) < 0.12                                          # 主屏也不会因此上传

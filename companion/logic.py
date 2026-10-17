@@ -25,6 +25,18 @@ def change_ratio(previous: Image.Image | None, current: Image.Image) -> float:
     return round(ImageStat.Stat(diff).mean[0] / 255.0, 4)
 
 
+def changed_fraction(previous: Image.Image | None, current: Image.Image, level: int = 12) -> float:
+    """缩略图里明显变化（灰度差 ≥ level/255）的格子占比。
+
+    平均差会把“小区域明显在动”（访谈/直播里的人像）稀释成接近 0，和暂停界面的转圈图标分不开；
+    这个指标看的是有多大面积在动：转圈图标约 0.3%，人像约 2%，换场景 80%+。
+    """
+    if previous is None:
+        return 1.0
+    histogram = ImageChops.difference(previous, current).histogram()
+    return round(sum(histogram[level:]) / (current.width * current.height), 4)
+
+
 def encode_jpeg(image: Image.Image, max_width: int, quality: int) -> bytes:
     if image.width > max_width:
         height = round(image.height * max_width / image.width)
