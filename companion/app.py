@@ -11,7 +11,10 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import ctypes
 import faulthandler
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -58,14 +61,36 @@ def app_dir() -> Path:
     return Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
 
 
-def load_config(path: str | None) -> dict:
+def acquire_instance_lock() -> bool:
+    """Keep manual launch and login startup from creating duplicate clients."""
+    if sys.platform != "win32":
+        return True
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    name = hashlib.sha256(str(app_dir().resolve()).casefold().encode()).hexdigest()[:24]
+    handle = kernel.CreateMutexW(None, False, "Local\\HermesCompanion-" + name)
+    error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(error)
+    if error == 183:  # ERROR_ALREADY_EXISTS
+        kernel.CloseHandle(handle)
+        return False
+    atexit.register(kernel.CloseHandle, handle)
+    return True
+
+
+def load_config(path: str | None, *, require_auth: bool = True) -> dict:
     file = Path(path) if path else app_dir() / "config.json"
     config = dict(DEFAULT_CONFIG)
     if file.is_file():
         config.update(json.loads(file.read_text(encoding="utf-8")))
     config["token"] = os.environ.get("COMPANION_TOKEN") or config["token"]
     config["server_url"] = os.environ.get("COMPANION_SERVER_URL") or config["server_url"]
-    if not config["server_url"] or not config["token"]:
+    if require_auth and (not config["server_url"] or not config["token"]):
         raise SystemExit(f"请在 {file} 里填写 server_url 和 token（参考 config.example.json）")
     config["server_url"] = config["server_url"].rstrip("/")
     return config
@@ -80,8 +105,11 @@ class Api:
             "X-Companion-Source": config["source"],
             "X-Companion-Client": f"win/{__version__}",
         })
-        if config.get("proxy"):
-            self.session.proxies = {"http": config["proxy"], "https": config["proxy"]}
+        proxy = config.get("proxy")
+        if proxy:
+            self.session.trust_env = False
+            if proxy != "direct":
+                self.session.proxies = {"http": proxy, "https": proxy}
 
     def state(self) -> dict:
         resp = self.session.get(f"{self.base}/state", timeout=15)
@@ -235,7 +263,10 @@ class Companion:
             return None
         if not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
             return None
-        covers = self._ensure_capturer().covers_monitor(fg)
+        capturer = self._ensure_capturer()
+        if not capturer.window_on_monitor(fg):
+            return None
+        covers = capturer.covers_monitor(fg)
         if looks_like_game(fg.process, covers, cfg["allow_processes"], cfg["deny_processes"],
                            cfg["non_game_processes"]):
             return "game"
@@ -261,11 +292,11 @@ class Companion:
 
     def _capture_once(self) -> None:
         cfg = self.config
-        self._ensure_capturer()
         fg = foreground()
-        if not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
+        if is_locked(fg) or not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
             self.stats["skipped_private"] += 1
             return
+        self._ensure_capturer()
         if not self.capturer.window_on_monitor(fg):
             return  # 前台窗口不在陪玩这块屏上
         scene = self._scene(fg)
@@ -277,6 +308,10 @@ class Companion:
             return
         if cfg["capture_area"] == "window":
             image = self.capturer.crop_to_window(image, fg)
+        latest = foreground()
+        if (latest.process.lower() != fg.process.lower() or latest.rect != fg.rect
+                or latest.title != fg.title or is_locked(latest)):
+            return  # Foreground changed during capture: discard rather than upload another window.
         thumb = thumbnail(image)
         change = change_ratio(self.decider.last_thumb, thumb)
         trigger = self.decider.decide(time.monotonic(), self.state, change, scene)
@@ -286,10 +321,14 @@ class Companion:
         jpeg = encode_jpeg(image, int(params.get("max_width", 1600)), int(params.get("jpeg_quality", 70)))
         result = self.api.upload(jpeg, trigger, change, fg.title, float(params.get("upload_kbps", 1500)), scene)
         self._accept_state(result.get("state") or self.state)
+        if result.get("accepted") is not True:
+            log.warning("接收端未接受截图，不计成功上传")
+            return
         self.decider.uploaded(time.monotonic(), thumb, result.get("frame_ts"), trigger)
         self.stats["uploads"] += 1
         self.stats["bytes"] += len(jpeg)
-        log.info("上传 %s/%s %.0fKB 变化%.2f %s", scene or "-", trigger, len(jpeg) / 1024, change, fg.process)
+        log.info("上传 %s/%s %.0fKB 变化%.2f %s bytes=%d", scene or "-", trigger,
+                 len(jpeg) / 1024, change, fg.process, len(jpeg))
         self._set_status(self._describe())
 
 
@@ -335,7 +374,8 @@ def run_tray(app: Companion) -> None:
 
     def refresh():
         icon.icon = _icon(color())
-        icon.title = f"Hermes 陪玩：{app.status}"
+        title = f"Hermes 陪玩：{app.status}"
+        icon.title = title.encode("utf-16-le")[:254].decode("utf-16-le", errors="ignore")
         icon.update_menu()
 
     app.on_change = refresh
@@ -439,7 +479,7 @@ def main() -> None:
         for i, m in enumerate(mss.mss().monitors[1:], 1):
             print(f"{i}: {m['width']}x{m['height']} @ ({m['left']},{m['top']})")
         return
-    config = load_config(args.config)
+    config = load_config(args.config, require_auth=not (args.bench or args.once))
     if args.bench:
         return bench(config, args.bench)
     if args.once:
@@ -453,6 +493,9 @@ def main() -> None:
         print("连通正常，令牌有效")
         return
 
+    if not acquire_instance_lock():
+        log.info("客户端已经运行，跳过重复启动")
+        return
     app = Companion(config)
     log.info("Hermes 陪玩客户端 %s 启动，来源 %s", __version__, config["source"])
     bind_hotkeys(app)

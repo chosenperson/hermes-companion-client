@@ -6,5 +6,8 @@ dist/
 *.spec
 .venv/
 *.jpg
+*.jpeg
+*.png
+*.webp
 companion.log*
 companion-stall.log

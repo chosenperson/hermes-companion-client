@@ -46,6 +46,11 @@ def foreground() -> Foreground:
     from ctypes import wintypes
 
     user32 = ctypes.windll.user32
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     hwnd = user32.GetForegroundWindow()
     if not hwnd:
         return Foreground()
@@ -78,8 +83,9 @@ def idle_seconds() -> float:
     info = LASTINPUTINFO()
     info.cbSize = ctypes.sizeof(info)
     if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
-        return 0.0
-    return max(0.0, (ctypes.windll.kernel32.GetTickCount() - info.dwTime) / 1000.0)
+        return float("inf")  # Unknown activity must not enable automatic capture.
+    ctypes.windll.kernel32.GetTickCount.restype = ctypes.c_uint32
+    return ((ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0
 
 
 def is_locked(fg: "Foreground") -> bool:
@@ -157,10 +163,10 @@ class Capturer:
     def crop_to_window(self, image: Image.Image, fg: Foreground) -> Image.Image:
         """裁成前台窗口区域，同屏其它窗口不外传。"""
         if not fg.rect:
-            return image
+            raise ValueError("前台窗口没有有效区域，跳过截图")
         left, top, _, _ = self.bounds
         box = (max(0, fg.rect[0] - left), max(0, fg.rect[1] - top),
                min(image.width, fg.rect[2] - left), min(image.height, fg.rect[3] - top))
-        if box[2] - box[0] < 64 or box[3] - box[1] < 64:
-            return image
+        if box[2] <= box[0] or box[3] <= box[1]:
+            raise ValueError("前台窗口未与所选显示器相交，跳过截图")
         return image.crop(box)

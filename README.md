@@ -96,7 +96,7 @@ copy config.example.json config.json   # 然后填写 server_url、token、monit
 | `auto_session` / `auto_stop_after_s` | 进游戏自动开、离开多少秒后自动关（默认 `true` / `600`） |
 | `non_game_processes` | 铺满屏也不当游戏的程序；默认含主流浏览器、资源管理器、编辑器、Office、播放器、Steam/Epic/WeGame 启动器 |
 | `hotkey_look` / `hotkey_pause` | 默认 `ctrl+alt+s` 让角色看一眼，`ctrl+alt+p` 暂停截图 |
-| `proxy` | 留空走系统代理；也可填 `http://127.0.0.1:7890` |
+| `proxy` | 留空走系统代理；`direct` 显式直连；也可填 HTTP 代理地址。显式设置时不继承环境代理 |
 
 独占全屏游戏可能截出黑屏，请在游戏设置里改“无边框窗口”。HDR 开启时截图颜色可能偏灰，不影响识别。
 

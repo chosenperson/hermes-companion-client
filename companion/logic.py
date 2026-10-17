@@ -117,6 +117,10 @@ class ThrottledReader(io.RawIOBase):
     def __len__(self) -> int:
         return len(self._data)
 
+    def tell(self) -> int:
+        """Expose the offset so requests does not add chunked framing."""
+        return self._pos
+
     def read(self, size: int = -1) -> bytes:
         if self._pos >= len(self._data):
             return b""
