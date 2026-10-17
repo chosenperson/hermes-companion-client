@@ -52,13 +52,16 @@ class Decider:
     last_thumb: Any = None
     hotkey_pending: bool = False
     quiet_until: float = 0.0
+    daily_quiet_until: float = 0.0
     history: list = field(default_factory=list)
 
     def update_state(self, now: float, state: dict) -> None:
         """服务端告知接下来多少秒不会看自动上传的图（冷却/判断间隔/用户正在聊）。"""
         self.quiet_until = now + float(state.get("quiet_for_s") or 0)
+        self.daily_quiet_until = now + float(state.get("daily_quiet_for_s") or 0)
 
-    def decide(self, now: float, state: dict, change: float) -> str | None:
+    def decide(self, now: float, state: dict, change: float, scene: str | None = "game") -> str | None:
+        """scene: game / daily；None 表示此刻不该自动上传（人不在、锁屏、日常关闭）。"""
         params = state.get("client") or {}
         if not state.get("enabled"):
             return None
@@ -66,9 +69,16 @@ class Decider:
             return "hotkey"
         if float(state.get("want_frame_after") or 0) > self.last_upload_server_ts:
             return "request"
-        if now < self.quiet_until:
+        if scene is None:
+            return None
+        if now < (self.daily_quiet_until if scene == "daily" else self.quiet_until):
             return None  # 服务端此时用不上，省流量
         since = now - self.last_upload if self.last_upload else float("inf")
+        if scene == "daily":
+            if change >= float(params.get("min_change", 0.12)) and since >= float(params.get("daily_min_upload_s", 300)):
+                return "change"
+            timer = float(params.get("daily_timer_upload_s", 900))
+            return "timer" if timer and since >= timer else None
         if state.get("mode") == "passive":
             interval = float(params.get("passive_upload_s", 60))
             return "timer" if interval and since >= interval and change >= 0.01 else None
@@ -155,8 +165,10 @@ class AutoSession:
     last_game: float = 0.0
     last_game_process: str = ""
 
-    def observe(self, now: float, enabled: bool, process: str, is_game: bool) -> str | None:
-        name = (process or "").lower()
+    def observe(self, now: float, enabled: bool, process: str, scene: str | None) -> str | None:
+        """scene: game=在玩游戏；daily=日常模式下人在电脑前；None=都不是（离开/锁屏/非目标）。"""
+        name = (process or "").lower() if scene == "game" else "*"
+        is_game = scene is not None  # 下面沿用“目标出现”的语义：游戏或日常都算
         if is_game:
             self.last_game = now
             self.last_game_process = name
@@ -170,10 +182,12 @@ class AutoSession:
             self.suppressed = self.last_game_process if now - self.last_game < 30 else ""
             return None
         if self.suppressed:
-            left_game = not is_game and now - self.last_game >= self.stop_after_s
-            if left_game or (is_game and name != self.suppressed):
+            # 手动结束后：人离开足够久，或开始一款新游戏，才恢复自动
+            left = not is_game and now - self.last_game >= self.stop_after_s
+            new_game = scene == "game" and name != self.suppressed
+            if left or new_game:
                 self.suppressed = ""
-        if is_game and not enabled and name != self.suppressed:
+        if is_game and not enabled and not self.suppressed:
             self.active, self.confirmed = True, False
             return "start"
         if self.active and enabled and not is_game and now - self.last_game >= self.stop_after_s:

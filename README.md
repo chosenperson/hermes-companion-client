@@ -17,6 +17,15 @@
 - **热键也能开**：陪玩未开启时按 `Ctrl+Alt+S` 直接开启并让伙伴看一眼。
 - 不想要自动行为：`"auto_session": false`，只用托盘、热键或聊天开关。
 
+## 日常陪伴（服务端开关）
+
+不玩游戏时也可以偶尔瞄一眼你在干嘛，像室友路过随口一句。开关在服务端：跟角色说“日常也陪我/日常别看了”，或托盘“日常也陪”。
+
+- 开启后，只要人在电脑前（键鼠 `daily_idle_s`=300 秒内有操作、未锁屏）、前台窗口在陪玩屏且不在黑名单，就自动开启陪玩；离开 10 分钟自动结束。
+- 节奏很低：画面变化最少隔 5 分钟传一张（`daily_min_upload_s`），无变化 15 分钟兜底（`daily_timer_upload_s`）；服务端主动开口最快 25 分钟一次、每小时最多 3 次。
+- 日常画面可以概括你在做什么，但不抄录聊天、邮件、账号、密码等具体信息；聊天/邮件/网银等画面判为敏感不说话。黑名单进程照旧不截。
+- 填了 `allow_processes` 时日常模式不生效（只陪白名单游戏）。窗口化（未铺满屏）的游戏请加进白名单，否则会按日常节奏处理。
+
 ## 工作方式
 
 ```
@@ -93,7 +102,7 @@ copy config.example.json config.json   # 然后填写 server_url、token、monit
 
 ## 托盘图标
 
-灰 = 陪玩未开启，绿 = 陪玩中，黄 = 本机暂停。菜单：开始/结束陪玩、主动搭话、只在问时看、让伙伴看一眼、暂停截图、退出。
+灰 = 陪玩未开启，绿 = 陪玩中，黄 = 本机暂停。菜单：开始/结束陪玩、主动搭话、只在问时看、日常也陪（开/关）、让伙伴看一眼、暂停截图、退出。
 
 ## 服务端接口（供自建）
 
@@ -102,9 +111,9 @@ copy config.example.json config.json   # 然后填写 server_url、token、monit
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/companion/v1/health` | 存活检查 |
-| GET | `/companion/v1/state` | `{enabled, mode, want_frame_after, quiet_for_s, server_time, client:{采集参数}}` |
-| POST | `/companion/v1/frame` | body 为 JPEG/PNG/WebP；头 `X-Companion-Source/Trigger/Change/Title`（Title 为 URL 编码）；返回 `{accepted, frame_ts, state}` |
-| POST | `/companion/v1/control` | `{"action": "start|stop|auto|passive"}` |
+| GET | `/companion/v1/state` | `{enabled, mode, daily, want_frame_after, quiet_for_s, daily_quiet_for_s, server_time, client:{采集参数}}` |
+| POST | `/companion/v1/frame` | body 为 JPEG/PNG/WebP；头 `X-Companion-Source/Trigger/Change/Title/Scene`（Title 为 URL 编码，Scene 为 game/daily）；返回 `{accepted, frame_ts, state}` |
+| POST | `/companion/v1/control` | `{"action": "start|stop|auto|passive|daily_on|daily_off"}` |
 
 ## 开发
 

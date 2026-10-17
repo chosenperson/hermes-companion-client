@@ -64,6 +64,28 @@ def foreground() -> Foreground:
     return Foreground(title=buffer.value, process=process, rect=box)
 
 
+LOCK_PROCESSES = {"lockapp.exe", "logonui.exe"}
+
+
+def idle_seconds() -> float:
+    """距最后一次键鼠输入的秒数（GetLastInputInfo）；非 Windows 返回 0。"""
+    if not IS_WINDOWS:
+        return 0.0
+
+    class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+    info = LASTINPUTINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        return 0.0
+    return max(0.0, (ctypes.windll.kernel32.GetTickCount() - info.dwTime) / 1000.0)
+
+
+def is_locked(fg: "Foreground") -> bool:
+    return not fg.process or fg.process.lower() in LOCK_PROCESSES
+
+
 class Capturer:
     def __init__(self, backend: str = "mss", monitor: int = 1):
         self.backend = backend

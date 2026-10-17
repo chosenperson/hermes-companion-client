@@ -135,28 +135,59 @@ def test_looks_like_game():
 def test_auto_session_lifecycle():
     from companion.logic import AutoSession
     a = AutoSession(stop_after_s=600)
-    assert a.observe(0, False, "explorer.exe", False) is None
-    assert a.observe(3, False, "game.exe", True) == "start"
-    assert a.observe(6, True, "game.exe", True) is None
-    assert a.observe(60, True, "msedge.exe", False) is None       # 切出去看攻略，不关
-    assert a.observe(605, True, "msedge.exe", False) is None      # 距最后见到游戏还不到 600 秒
-    assert a.observe(610, True, "msedge.exe", False) == "stop"
+    assert a.observe(0, False, "explorer.exe", None) is None
+    assert a.observe(3, False, "game.exe", "game") == "start"
+    assert a.observe(6, True, "game.exe", "game") is None
+    assert a.observe(60, True, "msedge.exe", None) is None        # 切出去看攻略，不关
+    assert a.observe(605, True, "msedge.exe", None) is None       # 距最后见到游戏还不到 600 秒
+    assert a.observe(610, True, "msedge.exe", None) == "stop"
     assert not a.active
 
 
 def test_auto_session_respects_manual_stop_and_manual_start():
     from companion.logic import AutoSession
     a = AutoSession(stop_after_s=600)
-    assert a.observe(0, False, "game.exe", True) == "start"
-    assert a.observe(3, False, "game.exe", True) == "start"        # 开启没成功（断网）继续尝试
-    assert a.observe(6, True, "game.exe", True) is None
-    assert a.observe(10, False, "game.exe", True) is None          # 飞书里说了结束：不再自动开
-    assert a.observe(20, False, "game.exe", True) is None
-    assert a.observe(30, False, "other_game.exe", True) == "start" # 换了游戏重新自动开
+    assert a.observe(0, False, "game.exe", "game") == "start"
+    assert a.observe(3, False, "game.exe", "game") == "start"     # 开启没成功（断网）继续尝试
+    assert a.observe(6, True, "game.exe", "game") is None
+    assert a.observe(10, False, "game.exe", "game") is None       # 飞书里说了结束：不再自动开
+    assert a.observe(20, False, "msedge.exe", "daily") is None    # 日常也不自动开
+    assert a.observe(30, False, "other_game.exe", "game") == "start"  # 换了游戏重新自动开
     a.manual(31, "stop")
-    assert a.observe(40, False, "other_game.exe", True) is None
-    assert a.observe(700, False, "explorer.exe", False) is None    # 退出游戏 ≥600 秒，解除
-    assert a.observe(703, False, "other_game.exe", True) == "start"
+    assert a.observe(40, False, "other_game.exe", "game") is None
+    assert a.observe(700, False, "explorer.exe", None) is None    # 离开 ≥600 秒，解除
+    assert a.observe(703, False, "other_game.exe", "game") == "start"
     b = AutoSession(stop_after_s=600)
-    b.manual(0, "start")                                           # 手动开的不自动关
-    assert b.observe(1000, True, "explorer.exe", False) is None
+    b.manual(0, "start")                                          # 手动开的不自动关
+    assert b.observe(1000, True, "explorer.exe", None) is None
+
+
+def test_auto_session_daily():
+    from companion.logic import AutoSession
+    a = AutoSession(stop_after_s=600)
+    assert a.observe(0, False, "msedge.exe", "daily") == "start"  # 日常模式：人在电脑前就开
+    assert a.observe(3, True, "code.exe", "daily") is None
+    assert a.observe(400, True, "-", None) is None                # 离开/锁屏
+    assert a.observe(604, True, "-", None) == "stop"              # 离开 10 分钟结束
+    assert a.observe(610, False, "msedge.exe", "daily") == "start"
+    assert a.observe(612, True, "msedge.exe", "daily") is None
+    a.manual(615, "stop")                                         # 日常里说了结束
+    assert a.observe(620, False, "code.exe", "daily") is None
+    assert a.observe(630, False, "game.exe", "game") == "start"   # 但开游戏照样自动开
+
+
+def test_decider_daily_cadence_and_absence():
+    d = Decider()
+    daily = dict(STATE, daily=True, client=dict(STATE["client"], daily_min_upload_s=300, daily_timer_upload_s=900))
+    t = 1000
+    assert d.decide(t, daily, 1.0, "daily") == "change"
+    d.uploaded(t, None, 10.0, "change")
+    assert d.decide(t + 100, daily, 0.5, "daily") is None         # 日常 5 分钟内不再传
+    assert d.decide(t + 301, daily, 0.5, "daily") == "change"
+    assert d.decide(t + 301, daily, 0.0, "daily") is None
+    assert d.decide(t + 901, daily, 0.0, "daily") == "timer"
+    assert d.decide(t + 901, daily, 1.0, None) is None            # 人不在不传
+    assert d.decide(t + 901, dict(daily, want_frame_after=11.0), 0.0, None) == "request"  # 但“你看这个”照传
+    d.update_state(t, dict(daily, quiet_for_s=0, daily_quiet_for_s=2000))
+    assert d.decide(t + 1000, daily, 1.0, "daily") is None        # 日常冷却中
+    assert d.decide(t + 1000, daily, 1.0, "game") == "change"

@@ -25,7 +25,7 @@ from pathlib import Path
 import requests
 
 from . import __version__
-from .capture import Capturer, enable_dpi_awareness, foreground
+from .capture import Capturer, enable_dpi_awareness, foreground, idle_seconds, is_locked
 from .logic import (NON_GAME_PROCESSES, AutoSession, Decider, ThrottledReader, change_ratio, encode_jpeg,
                     looks_like_game, process_allowed, thumbnail)
 
@@ -93,13 +93,15 @@ class Api:
         resp.raise_for_status()
         return resp.json()
 
-    def upload(self, jpeg: bytes, trigger: str, change: float, title: str, kbps: float) -> dict:
+    def upload(self, jpeg: bytes, trigger: str, change: float, title: str, kbps: float,
+               scene: str | None = "game") -> dict:
         headers = {
             "Content-Type": "image/jpeg",
             "Content-Length": str(len(jpeg)),
             "X-Companion-Trigger": trigger,
             "X-Companion-Change": f"{change:.4f}",
             "X-Companion-Title": urllib.parse.quote(title[:120]),
+            "X-Companion-Scene": scene or "daily",
         }
         resp = self.session.post(f"{self.base}/frame", data=ThrottledReader(jpeg, kbps),
                                  headers=headers, timeout=60)
@@ -112,7 +114,8 @@ class Companion:
         self.config = config
         self.api = Api(config)
         self.capturer: Capturer | None = None
-        self._last_auto = 0.0  # 在截图线程里创建：Windows GDI 句柄不能跨线程用
+        self._last_auto = 0.0
+        self.scene: str | None = None  # 在截图线程里创建：Windows GDI 句柄不能跨线程用
         self.decider = Decider()
         self.state = dict(FALLBACK_STATE)
         self.paused = False
@@ -166,7 +169,8 @@ class Companion:
             return "陪玩未开启"
         if self.paused:
             return "本机已暂停截图"
-        return "陪玩中（主动）" if self.state.get("mode") == "auto" else "陪玩中（只在问时看）"
+        mode = "主动" if self.state.get("mode") == "auto" else "只在问时看"
+        return f"陪玩中（{mode}{'，含日常' if self.state.get('daily') else ''}）"
 
     def _poll_state(self) -> None:
         try:
@@ -223,15 +227,28 @@ class Companion:
             log.info("截图后端 %s 显示器 %s 已就绪", self.config["backend"], self.config["monitor"])
         return self.capturer
 
-    def _auto_check(self) -> None:
+    def _scene(self, fg) -> str | None:
+        """game=在玩游戏；daily=日常模式下人在电脑前；None=离开、锁屏、隐私窗口或日常关闭。"""
         cfg = self.config
-        fg = foreground()
+        params = self.state.get("client") or {}
+        if is_locked(fg) or idle_seconds() >= float(params.get("daily_idle_s", 300)):
+            return None
+        if not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
+            return None
         covers = self._ensure_capturer().covers_monitor(fg)
-        is_game = looks_like_game(fg.process, covers, cfg["allow_processes"], cfg["deny_processes"],
-                                  cfg["non_game_processes"])
-        action = self.auto.observe(time.monotonic(), bool(self.state.get("enabled")), fg.process, is_game)
+        if looks_like_game(fg.process, covers, cfg["allow_processes"], cfg["deny_processes"],
+                           cfg["non_game_processes"]):
+            return "game"
+        if self.state.get("daily") and not cfg["allow_processes"] and self.capturer.window_on_monitor(fg):
+            return "daily"
+        return None
+
+    def _auto_check(self) -> None:
+        fg = foreground()
+        scene = self._scene(fg)
+        action = self.auto.observe(time.monotonic(), bool(self.state.get("enabled")), fg.process, scene)
         if action:
-            log.info("自动%s陪玩（%s）", "开启" if action == "start" else "结束", fg.process or "无游戏")
+            log.info("自动%s陪玩（%s，%s）", "开启" if action == "start" else "结束", scene or "离开", fg.process or "-")
             self.control(action, source="auto")
 
     def _reset_capturer(self) -> None:
@@ -251,6 +268,10 @@ class Companion:
             return
         if not self.capturer.window_on_monitor(fg):
             return  # 前台窗口不在陪玩这块屏上
+        scene = self._scene(fg)
+        if scene is None and not self.decider.hotkey_pending and \
+                float(self.state.get("want_frame_after") or 0) <= self.decider.last_upload_server_ts:
+            return  # 人不在/锁屏/日常关闭：不截图
         image = self.capturer.grab()
         if image is None:
             return
@@ -258,17 +279,17 @@ class Companion:
             image = self.capturer.crop_to_window(image, fg)
         thumb = thumbnail(image)
         change = change_ratio(self.decider.last_thumb, thumb)
-        trigger = self.decider.decide(time.monotonic(), self.state, change)
+        trigger = self.decider.decide(time.monotonic(), self.state, change, scene)
         if not trigger:
             return
         params = self.state.get("client") or {}
         jpeg = encode_jpeg(image, int(params.get("max_width", 1600)), int(params.get("jpeg_quality", 70)))
-        result = self.api.upload(jpeg, trigger, change, fg.title, float(params.get("upload_kbps", 1500)))
+        result = self.api.upload(jpeg, trigger, change, fg.title, float(params.get("upload_kbps", 1500)), scene)
         self._accept_state(result.get("state") or self.state)
         self.decider.uploaded(time.monotonic(), thumb, result.get("frame_ts"), trigger)
         self.stats["uploads"] += 1
         self.stats["bytes"] += len(jpeg)
-        log.info("上传 %s %.0fKB 变化%.2f %s", trigger, len(jpeg) / 1024, change, fg.process)
+        log.info("上传 %s/%s %.0fKB 变化%.2f %s", scene or "-", trigger, len(jpeg) / 1024, change, fg.process)
         self._set_status(self._describe())
 
 
@@ -302,6 +323,8 @@ def run_tray(app: Companion) -> None:
         item("结束陪玩", lambda: app.control("stop")),
         item("主动搭话", lambda: app.control("auto")),
         item("只在问时看", lambda: app.control("passive")),
+        pystray.MenuItem(lambda _i: "日常也陪：开（点击关闭）" if app.state.get("daily") else "日常也陪：关（点击开启）",
+                         lambda icon, _item: app.control("daily_off" if app.state.get("daily") else "daily_on")),
         pystray.Menu.SEPARATOR,
         item(f"让伙伴看一眼（{app.config['hotkey_look']}）", app.look_now),
         item(lambda _i: "恢复截图" if app.paused else f"暂停截图（{app.config['hotkey_pause']}）", app.toggle_pause),
