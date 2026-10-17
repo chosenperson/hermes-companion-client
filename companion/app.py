@@ -184,8 +184,9 @@ class Companion:
 
     # ---- 主循环
     def _set_status(self, text: str) -> None:
-        if text != self.status:
-            log.info(text)
+        if text == self.status:
+            return
+        log.info(text)
         self.status = text
         try:
             self.on_change()
@@ -348,6 +349,16 @@ def _icon(color: str):
 def run_tray(app: Companion) -> None:
     import pystray
 
+    icon_class = pystray.Icon
+    if sys.platform == "win32":
+        class WindowsIcon(pystray.Icon):
+            def _on_notify(self, wparam, lparam):
+                if lparam == 0x0205:  # WM_RBUTTONUP, before TrackPopupMenuEx opens the menu.
+                    self.update_menu()
+                return super()._on_notify(wparam, lparam)
+
+        icon_class = WindowsIcon
+
     def color() -> str:
         if not app.state.get("enabled"):
             return "#888888"
@@ -370,13 +381,14 @@ def run_tray(app: Companion) -> None:
         pystray.Menu.SEPARATOR,
         item("退出", lambda: (app.stop(), icon.stop())),
     )
-    icon = pystray.Icon("hermes-companion", _icon(color()), "Hermes 陪玩", menu)
+    icon = icon_class("hermes-companion", _icon(color()), "Hermes 陪玩", menu)
 
     def refresh():
         icon.icon = _icon(color())
         title = f"Hermes 陪玩：{app.status}"
         icon.title = title.encode("utf-16-le")[:254].decode("utf-16-le", errors="ignore")
-        icon.update_menu()
+        if sys.platform != "win32":
+            icon.update_menu()
 
     app.on_change = refresh
     icon.run()

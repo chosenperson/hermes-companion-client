@@ -145,7 +145,7 @@ class Capturer:
 
     def window_on_monitor(self, fg: Foreground) -> bool:
         """前台窗口中心是否落在所选显示器上（只陪这块屏幕上的游戏）。"""
-        if not fg.rect:
+        if not fg.rect or fg.rect[2] <= fg.rect[0] or fg.rect[3] <= fg.rect[1]:
             return False
         left, top, right, bottom = self.bounds
         cx = (fg.rect[0] + fg.rect[2]) / 2

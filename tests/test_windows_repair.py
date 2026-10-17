@@ -108,6 +108,74 @@ def test_border_slack_negative_coordinates_and_crop(bounds):
         cap.crop_to_window(image, Foreground())
 
 
+def test_hidden_zero_area_tray_window_is_not_on_monitor():
+    class Probe(Capturer):
+        @property
+        def bounds(self):
+            return (0, 0, 3840, 2160)
+
+    cap = Probe.__new__(Probe)
+    for rect in ((0, 0, 0, 0), (50, 50, 50, 100), (0, 100, 10, 50)):
+        assert not cap.window_on_monitor(Foreground(process='pythonw.exe', rect=rect))
+
+
+def test_unchanged_poll_status_does_not_refresh_tray():
+    app = make_app()
+    app.on_change = Mock()
+    app._set_status('connected')
+    app._set_status('connected')
+    app.on_change.assert_called_once()
+
+
+def test_windows_menu_is_not_rebuilt_while_popup_is_open(monkeypatch):
+    app = make_app()
+    generations = []
+
+    class Item:
+        def __init__(self, text, action, **kwargs):
+            self.text = text
+            self.action = action
+
+        def __call__(self, icon):
+            return self.action(icon, self)
+
+    class Menu(list):
+        SEPARATOR = object()
+
+        def __init__(self, *items):
+            super().__init__(items)
+
+    class Icon:
+        def __init__(self, name, image, title, menu):
+            self.menu = menu
+            self.generation = 0
+
+        def update_menu(self):
+            self.generation += 1
+
+        def _on_notify(self, wparam, lparam):
+            snapshot = self.generation
+            worker = threading.Thread(target=lambda: app._set_status('external state update'))
+            worker.start()
+            worker.join(3)
+            assert self.generation == snapshot  # Native menu handles must remain valid.
+            pause = next(item for item in self.menu if isinstance(item, Item) and callable(item.text)
+                         and ('暂停截图' in item.text(item) or '恢复截图' in item.text(item)))
+            pause(self)
+            generations.append(self.generation)
+
+        def run(self):
+            self._on_notify(0, 0x0205)
+            assert app.paused
+            self._on_notify(0, 0x0205)
+            assert not app.paused
+
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    monkeypatch.setitem(sys.modules, 'pystray', SimpleNamespace(Icon=Icon, Menu=Menu, MenuItem=Item))
+    run_tray(app)
+    assert generations == [1, 2]
+
+
 def test_whitelisted_game_on_other_monitor_is_not_a_scene(monkeypatch):
     app = make_app()
     app.config['allow_processes'] = ['game.exe']
