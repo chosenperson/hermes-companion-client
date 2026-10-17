@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import logging
+import logging.handlers
 import os
 import sys
 import threading
@@ -105,12 +107,13 @@ class Companion:
     def __init__(self, config: dict):
         self.config = config
         self.api = Api(config)
-        self.capturer = Capturer(config["backend"], config["monitor"])
+        self.capturer: Capturer | None = None  # 在截图线程里创建：Windows GDI 句柄不能跨线程用
         self.decider = Decider()
         self.state = dict(FALLBACK_STATE)
         self.paused = False
         self.status = "启动中"
         self.stats = {"uploads": 0, "bytes": 0, "skipped_private": 0}
+        self.heartbeat = time.monotonic()
         self._stop = threading.Event()
         self._wake = threading.Event()
         self.on_change = lambda: None
@@ -145,7 +148,10 @@ class Companion:
         if text != self.status:
             log.info(text)
         self.status = text
-        self.on_change()
+        try:
+            self.on_change()
+        except Exception:  # 托盘刷新失败不能拖垮截图线程
+            log.exception("托盘刷新失败")
 
     def _describe(self) -> str:
         if not self.state.get("enabled"):
@@ -162,8 +168,16 @@ class Companion:
             self._set_status(f"连不上服务器：{type(exc).__name__}")
 
     def run(self) -> None:
+        try:
+            self._loop()
+        except BaseException:
+            log.exception("截图线程异常退出")
+            raise
+
+    def _loop(self) -> None:
         last_poll = 0.0
         while not self._stop.is_set():
+            self.heartbeat = time.monotonic()
             params = self.state.get("client") or {}
             now = time.monotonic()
             enabled = bool(self.state.get("enabled"))
@@ -175,7 +189,9 @@ class Companion:
                 try:
                     self._capture_once()
                 except Exception as exc:
+                    log.exception("截图/上传失败")
                     self._set_status(f"截图/上传失败：{type(exc).__name__}: {exc}")
+                    self._reset_capturer()
             elif self.decider.hotkey_pending:
                 self.decider.hotkey_pending = False
                 self._set_status("陪玩未开启或已暂停，热键忽略")
@@ -183,8 +199,19 @@ class Companion:
             self._wake.wait(interval)
             self._wake.clear()
 
+    def _reset_capturer(self) -> None:
+        try:
+            if self.capturer is not None:
+                self.capturer.close()
+        except Exception:
+            pass
+        self.capturer = None
+
     def _capture_once(self) -> None:
         cfg = self.config
+        if self.capturer is None:
+            self.capturer = Capturer(cfg["backend"], cfg["monitor"])
+            log.info("截图后端 %s 显示器 %s 已就绪", cfg["backend"], cfg["monitor"])
         fg = foreground()
         if not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
             self.stats["skipped_private"] += 1
@@ -302,6 +329,42 @@ def bench(config: dict, count: int) -> None:
     print(f"上传图平均 {sum(sizes)/len(sizes)/1024:.0f}KB；测试期间进程 CPU {cpu:.1f}%（{wall:.1f}s 内连续截 {len(timings)} 张）")
 
 
+def setup_logging() -> None:
+    """控制台 + 程序目录下 companion.log（1MB×3 轮转）；托盘模式没有控制台也能事后排查。"""
+    fmt = logging.Formatter("%(asctime)s %(threadName)s %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if sys.stderr is not None:
+        console = logging.StreamHandler()
+        console.setFormatter(fmt)
+        root.addHandler(console)
+    try:
+        handler = logging.handlers.RotatingFileHandler(app_dir() / "companion.log", maxBytes=1_000_000,
+                                                       backupCount=3, encoding="utf-8")
+        handler.setFormatter(fmt)
+        root.addHandler(handler)
+    except OSError:
+        pass
+
+
+def start_watchdog(app: "Companion", stall_s: float = 60) -> None:
+    """截图线程超过 stall_s 没有心跳时，把所有线程调用栈写进 companion.log（每次卡住只写一次）。"""
+    path = app_dir() / "companion-stall.log"
+
+    def watch() -> None:
+        dumped = False
+        while not app._stop.wait(10):
+            stalled = time.monotonic() - app.heartbeat > stall_s
+            if stalled and not dumped:
+                log.error("截图线程 %.0f 秒没有心跳，调用栈已写入 %s", time.monotonic() - app.heartbeat, path.name)
+                with open(path, "a", encoding="utf-8") as handle:
+                    handle.write(f"\n==== {time.strftime('%F %T')} stall ====\n")
+                    faulthandler.dump_traceback(file=handle, all_threads=True)
+            dumped = stalled
+
+    threading.Thread(target=watch, name="watchdog", daemon=True).start()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="hermes-companion")
     parser.add_argument("--config")
@@ -311,7 +374,7 @@ def main() -> None:
     parser.add_argument("--once", metavar="FILE")
     parser.add_argument("--list-monitors", action="store_true")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    setup_logging()
     enable_dpi_awareness()
 
     if args.list_monitors:
@@ -335,9 +398,11 @@ def main() -> None:
         return
 
     app = Companion(config)
+    log.info("Hermes 陪玩客户端 %s 启动，来源 %s", __version__, config["source"])
     bind_hotkeys(app)
     worker = threading.Thread(target=app.run, name="capture", daemon=True)
     worker.start()
+    start_watchdog(app)
     if args.no_tray:
         try:
             while worker.is_alive():

@@ -6,3 +6,5 @@ dist/
 *.spec
 .venv/
 *.jpg
+companion.log*
+companion-stall.log

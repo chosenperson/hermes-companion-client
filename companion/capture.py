@@ -85,6 +85,15 @@ class Capturer:
         else:
             raise ValueError(f"未知截图后端 {backend}")
 
+    def close(self) -> None:
+        if self.backend == "mss":
+            self._mss.close()
+        else:
+            try:
+                self._cam.release()
+            except Exception:
+                pass
+
     @property
     def bounds(self) -> tuple[int, int, int, int]:
         """所选显示器在虚拟桌面里的 left, top, right, bottom。"""
