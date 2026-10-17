@@ -108,6 +108,11 @@ def process_at(x: int, y: int) -> str:
     from ctypes import wintypes
 
     user32 = ctypes.windll.user32
+    user32.WindowFromPoint.argtypes = [wintypes.POINT]
+    user32.WindowFromPoint.restype = wintypes.HWND
+    user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetAncestor.restype = wintypes.HWND
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     hwnd = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
     if not hwnd:
         return ""

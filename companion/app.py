@@ -29,7 +29,7 @@ from pathlib import Path
 import requests
 
 from . import __version__
-from .capture import Capturer, enable_dpi_awareness, foreground, idle_seconds, is_locked, process_at, is_shell_surface
+from .capture import Capturer, Foreground, enable_dpi_awareness, foreground, idle_seconds, is_locked, process_at, is_shell_surface
 from .logic import (NON_GAME_PROCESSES, AutoSession, Decider, ThrottledReader, change_ratio, encode_jpeg,
                     looks_like_game, process_allowed, thumbnail)
 
@@ -183,6 +183,8 @@ class Companion:
         self._set_status("本机已暂停截图" if self.paused else "已恢复")
 
     def _accept_state(self, state: dict) -> None:
+        if bool(state.get("watch")) != bool(self.state.get("watch")):
+            self.watch["since"] = 0.0
         self.state = state
         self.decider.update_state(time.monotonic(), state)
 
@@ -252,9 +254,10 @@ class Companion:
                 except Exception as exc:
                     log.exception("副屏陪看失败")
                     self._set_status(f"副屏陪看失败：{type(exc).__name__}: {exc}")
-                    self.watch_capturer = None
+                    self._reset_watch_capturer()
             elif not self.state.get("watch"):
                 self.watch["since"] = 0.0
+                self._reset_watch_capturer()
             if self.state.get("enabled") and not self.paused:
                 try:
                     self._capture_once()
@@ -320,22 +323,36 @@ class Companion:
         now = time.monotonic()
         w = self.watch
         if not w["since"]:
-            w.update(since=now, last_change=now, last_check=0.0, thumb=None)
+            w.update(since=now, last_change=now, last_check=0.0, thumb=None,
+                     last_upload=0.0, server_ts=0.0, blocked_reason="")
+        if now - w["since"] >= float(params.get("watch_max_s", 10800)):
+            log.info("陪看达到最长时长，自动结束")
+            return self.control("watch_off", source="auto")
         requested = float(self.state.get("want_frame_after") or 0) > w["server_ts"]
         due = now - w["last_upload"] >= float(params.get("watch_upload_s", 600))
         if now - w["last_check"] < self.watch_check_s and not requested and not due:
             return
+        if is_locked(foreground()):
+            return  # Lock screen must block watch uploads as well as primary uploads.
         if self.watch_capturer is None:
             self.watch_capturer = Capturer(self.config["backend"], self.config["watch_monitor"])
             log.info("副屏 %s 已就绪", self.config["watch_monitor"])
         left, top, right, bottom = self.watch_capturer.bounds
         center_process = process_at((left + right) // 2, (top + bottom) // 2)
-        if not process_allowed(center_process, [], self.config["deny_processes"]):
+        if not center_process or not process_allowed(center_process, [], self.config["deny_processes"]):
+            if w.get("blocked_reason") != (center_process or "unknown"):
+                log.info("副屏中心窗口不允许截图：%s", center_process or "unknown")
+                w["blocked_reason"] = center_process or "unknown"
             w["last_check"] = now
             return  # 副屏中间是聊天等隐私窗口
+        w["blocked_reason"] = ""
         image = self.watch_capturer.grab()
         if image is None:
             return
+        if (is_locked(foreground())
+                or process_at((left + right) // 2, (top + bottom) // 2).lower() != center_process.lower()):
+            self._reset_watch_capturer()
+            return  # Discard a frame taken while the center window was changing.
         thumb = thumbnail(image)
         change = change_ratio(w["thumb"], thumb)
         w.update(last_check=now, thumb=thumb)
@@ -344,19 +361,33 @@ class Companion:
         if now - w["last_change"] >= float(params.get("watch_static_stop_s", 900)):
             log.info("副屏画面长时间不动，自动结束陪看")
             return self.control("watch_off", source="auto")
-        if now - w["since"] >= float(params.get("watch_max_s", 10800)):
-            log.info("陪看达到最长时长，自动结束")
-            return self.control("watch_off", source="auto")
         if not (requested or due):
             return
         jpeg = encode_jpeg(image, int(params.get("max_width", 1600)), int(params.get("jpeg_quality", 70)))
         result = self.api.upload(jpeg, "request" if requested else "timer", change, center_process,
                                  float(params.get("upload_kbps", 1500)), "watch",
                                  source=f"{self.config['source']}-side")
+        self._accept_state(result.get("state") or self.state)
+        if result.get("accepted") is not True:
+            log.warning("接收端未接受副屏截图，不计成功上传")
+            return
         w["last_upload"] = now
         w["server_ts"] = float(result.get("frame_ts") or w["server_ts"])
-        self._accept_state(result.get("state") or self.state)
-        log.info("上传 watch %.0fKB 变化%.2f %s", len(jpeg) / 1024, change, center_process or "-")
+        self.stats["uploads"] += 1
+        self.stats["bytes"] += len(jpeg)
+        trigger = "request" if requested else "timer"
+        self._save_last_upload(jpeg, Foreground(process=center_process, rect=(left, top, right, bottom)),
+                               "watch", trigger, result.get("frame_ts"), monitor=self.config["watch_monitor"])
+        log.info("上传 watch/%s %.0fKB 变化%.2f %s bytes=%d", trigger,
+                 len(jpeg) / 1024, change, center_process, len(jpeg))
+
+    def _reset_watch_capturer(self) -> None:
+        try:
+            if self.watch_capturer is not None:
+                self.watch_capturer.close()
+        except Exception:
+            log.exception("关闭副屏截图后端失败")
+        self.watch_capturer = None
 
     def _reset_capturer(self) -> None:
         try:
@@ -408,12 +439,14 @@ class Companion:
                  len(jpeg) / 1024, change, fg.process, len(jpeg))
         self._set_status(self._describe())
 
-    def _save_last_upload(self, jpeg: bytes, fg, scene, trigger, frame_ts) -> None:
+    def _save_last_upload(self, jpeg: bytes, fg, scene, trigger, frame_ts, *, monitor=None) -> None:
         directory = self.config.get("last_upload_dir")
         if not directory:
             return
         try:
             root = Path(directory)
+            if scene == "watch":
+                root = root / "watch"
             root.mkdir(parents=True, exist_ok=True)
             digest = hashlib.sha256(jpeg).hexdigest()
             image_name = f"last-upload-{digest}.jpg"
@@ -426,7 +459,8 @@ class Companion:
                 "client_version": __version__, "image": image_name, "sha256": digest,
                 "bytes": len(jpeg), "process": fg.process, "title": fg.title,
                 "rect": fg.rect, "window_class": fg.window_class,
-                "monitor": self.config["monitor"], "scene": scene or "daily", "trigger": trigger,
+                "monitor": self.config["monitor"] if monitor is None else monitor,
+                "scene": scene or "daily", "trigger": trigger,
             }
             temporary = root / "last-upload.json.tmp"
             temporary.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
