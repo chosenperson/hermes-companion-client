@@ -100,6 +100,26 @@ def idle_seconds() -> float:
     return ((ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0
 
 
+def process_at(x: int, y: int) -> str:
+    """屏幕坐标处顶层窗口的进程名（用于副屏隐私过滤）；非 Windows 返回空。"""
+    if not IS_WINDOWS:
+        return ""
+    import psutil
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+    if not hwnd:
+        return ""
+    root = user32.GetAncestor(hwnd, 2) or hwnd  # GA_ROOT
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
+    try:
+        return psutil.Process(pid.value).name()
+    except Exception:
+        return ""
+
+
 def is_locked(fg: "Foreground") -> bool:
     return not fg.process or fg.process.lower() in LOCK_PROCESSES
 

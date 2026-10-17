@@ -25,6 +25,8 @@
   ],
   "auto_session": true,
   "auto_stop_after_s": 600,
+  "watch_monitor": null,
+  "hotkey_watch": "ctrl+alt+w",
   "hotkey_look": "ctrl+alt+s",
   "hotkey_pause": "ctrl+alt+p",
   "proxy": "",

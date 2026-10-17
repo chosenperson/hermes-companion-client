@@ -26,6 +26,16 @@
 - 日常画面可以概括你在做什么，但不抄录聊天、邮件、账号、密码等具体信息；聊天/邮件/网银等画面判为敏感不说话。黑名单进程照旧不截。
 - 填了 `allow_processes` 时日常模式不生效（只陪白名单游戏）。窗口化（未铺满屏）的游戏请加进白名单，否则会按日常节奏处理。
 
+## 双屏：副屏陪看（只在电脑上开）
+
+主屏照常自动陪玩/日常；副屏（看电视、追剧、直播）默认**不截**。想一起看时在电脑上按 `Ctrl+Alt+W` 或托盘“陪看副屏”，再按一次结束——不需要在聊天里说任何指令，角色也不会宣告“开始陪看”，只会在觉得值得时自然接一句。
+
+- 需在 `config.json` 填 `watch_monitor`（副屏编号，`--list-monitors` 查看）；不填则没有该功能。
+- 开启后每 10 分钟截一张副屏整屏（`watch_upload_s`），每分钟比一次帧判断是否还在播；**不看键鼠**，看电视不碰电脑也不会被当作离开。
+- 画面 15 分钟不动（暂停/关了，`watch_static_stop_s`）或满 3 小时（`watch_max_s`）自动结束，服务端删除副屏截图。
+- 副屏中央是聊天等黑名单进程时不截。主屏在玩游戏时，陪看只截不说，避免两边同时开口。
+- 在聊天里问“这人是谁”时，角色会同时看主屏和副屏再回答。
+
 ## 工作方式
 
 ```
@@ -95,6 +105,7 @@ copy config.example.json config.json   # 然后填写 server_url、token、monit
 | `allow_processes` / `deny_processes` | 进程白名单 / 黑名单（如 `eldenring.exe`） |
 | `auto_session` / `auto_stop_after_s` | 进游戏自动开、离开多少秒后自动关（默认 `true` / `600`） |
 | `non_game_processes` | 铺满屏也不当游戏的程序；默认含主流浏览器、资源管理器、编辑器、Office、播放器、Steam/Epic/WeGame 启动器 |
+| `watch_monitor` / `hotkey_watch` | 副屏编号（填了才有陪看）/ 陪看开关热键（默认 `ctrl+alt+w`） |
 | `hotkey_look` / `hotkey_pause` | 默认 `ctrl+alt+s` 让角色看一眼，`ctrl+alt+p` 暂停截图 |
 | `proxy` | 留空走系统代理；`direct` 显式直连；也可填 HTTP 代理地址。显式设置时不继承环境代理 |
 | `last_upload_dir` | 默认空，不保存图片；填写 `last-upload` 或本地绝对目录后，仅保留最近一次服务端接受的原始 JPEG 和 `last-upload.json`（时间、程序、窗口、SHA256）。用于核对实际上传内容，目录内的图片和元数据均不要提交或分享 |
@@ -113,8 +124,8 @@ copy config.example.json config.json   # 然后填写 server_url、token、monit
 |---|---|---|
 | GET | `/companion/v1/health` | 存活检查 |
 | GET | `/companion/v1/state` | `{enabled, mode, daily, want_frame_after, quiet_for_s, daily_quiet_for_s, server_time, client:{采集参数}}` |
-| POST | `/companion/v1/frame` | body 为 JPEG/PNG/WebP；头 `X-Companion-Source/Trigger/Change/Title/Scene`（Title 为 URL 编码，Scene 为 game/daily）；返回 `{accepted, frame_ts, state}` |
-| POST | `/companion/v1/control` | `{"action": "start|stop|auto|passive|daily_on|daily_off"}` |
+| POST | `/companion/v1/frame` | body 为 JPEG/PNG/WebP；头 `X-Companion-Source/Trigger/Change/Title/Scene`（Title 为 URL 编码，Scene 为 game/daily/watch）；返回 `{accepted, frame_ts, state}` |
+| POST | `/companion/v1/control` | `{"action": "start|stop|auto|passive|daily_on|daily_off|watch_on|watch_off"}` |
 
 ## 开发
 

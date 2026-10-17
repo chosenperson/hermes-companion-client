@@ -29,7 +29,7 @@ from pathlib import Path
 import requests
 
 from . import __version__
-from .capture import Capturer, enable_dpi_awareness, foreground, idle_seconds, is_locked, is_shell_surface
+from .capture import Capturer, enable_dpi_awareness, foreground, idle_seconds, is_locked, process_at, is_shell_surface
 from .logic import (NON_GAME_PROCESSES, AutoSession, Decider, ThrottledReader, change_ratio, encode_jpeg,
                     looks_like_game, process_allowed, thumbnail)
 
@@ -51,6 +51,8 @@ DEFAULT_CONFIG = {
     "auto_session": True,
     "auto_stop_after_s": 600,
     "non_game_processes": NON_GAME_PROCESSES,
+    "watch_monitor": None,           # 副屏编号；填了才有“陪看副屏”
+    "hotkey_watch": "ctrl+alt+w",
     "hotkey_look": "ctrl+alt+s",
     "hotkey_pause": "ctrl+alt+p",
     "proxy": "",
@@ -124,7 +126,7 @@ class Api:
         return resp.json()
 
     def upload(self, jpeg: bytes, trigger: str, change: float, title: str, kbps: float,
-               scene: str | None = "game") -> dict:
+               scene: str | None = "game", source: str | None = None) -> dict:
         headers = {
             "Content-Type": "image/jpeg",
             "Content-Length": str(len(jpeg)),
@@ -133,6 +135,8 @@ class Api:
             "X-Companion-Title": urllib.parse.quote(title[:120]),
             "X-Companion-Scene": scene or "daily",
         }
+        if source:
+            headers["X-Companion-Source"] = source
         resp = self.session.post(f"{self.base}/frame", data=ThrottledReader(jpeg, kbps),
                                  headers=headers, timeout=60)
         resp.raise_for_status()
@@ -145,7 +149,11 @@ class Companion:
         self.api = Api(config)
         self.capturer: Capturer | None = None
         self._last_auto = 0.0
-        self.scene: str | None = None  # 在截图线程里创建：Windows GDI 句柄不能跨线程用
+        self.scene: str | None = None
+        self.watch_capturer: Capturer | None = None
+        self.watch_check_s = 60.0  # 副屏比帧间隔：用来判断是否还在播
+        self.watch = {"thumb": None, "last_check": 0.0, "last_change": 0.0, "last_upload": 0.0,
+                      "server_ts": 0.0, "since": 0.0}  # 在截图线程里创建：Windows GDI 句柄不能跨线程用
         self.decider = Decider()
         self.state = dict(FALLBACK_STATE)
         self.paused = False
@@ -162,6 +170,12 @@ class Companion:
         log.info("收到看一眼请求")
         self.decider.hotkey_pending = True
         self._wake.set()
+
+    def toggle_watch(self) -> None:
+        if not self.config.get("watch_monitor"):
+            self._set_status("未配置副屏（config.json 的 watch_monitor）")
+            return
+        self.control("watch_off" if self.state.get("watch") else "watch_on")
 
     def toggle_pause(self) -> None:
         self.paused = not self.paused
@@ -204,7 +218,8 @@ class Companion:
         if self.paused:
             return "本机已暂停截图"
         mode = "主动" if self.state.get("mode") == "auto" else "只在问时看"
-        return f"陪玩中（{mode}{'，含日常' if self.state.get('daily') else ''}）"
+        extra = ("，含日常" if self.state.get("daily") else "") + ("，陪看副屏" if self.state.get("watch") else "")
+        return f"陪玩中（{mode}{extra}）"
 
     def _poll_state(self) -> None:
         try:
@@ -231,6 +246,15 @@ class Companion:
             if now - last_poll >= poll_every or (self.decider.hotkey_pending and not enabled):
                 self._poll_state()
                 last_poll = now
+            if self.state.get("watch") and not self.paused and self.config.get("watch_monitor"):
+                try:
+                    self._watch_once()
+                except Exception as exc:
+                    log.exception("副屏陪看失败")
+                    self._set_status(f"副屏陪看失败：{type(exc).__name__}: {exc}")
+                    self.watch_capturer = None
+            elif not self.state.get("watch"):
+                self.watch["since"] = 0.0
             if self.state.get("enabled") and not self.paused:
                 try:
                     self._capture_once()
@@ -283,10 +307,56 @@ class Companion:
     def _auto_check(self) -> None:
         fg = foreground()
         scene = self._scene(fg)
+        if scene is None and self.state.get("watch"):
+            scene = "watch"  # 陪看副屏时不碰键鼠也算在场，不自动结束
         action = self.auto.observe(time.monotonic(), bool(self.state.get("enabled")), fg.process, scene)
         if action:
             log.info("自动%s陪玩（%s，%s）", "开启" if action == "start" else "结束", scene or "离开", fg.process or "-")
             self.control(action, source="auto")
+
+    def _watch_once(self) -> None:
+        """副屏陪看：每分钟比一次帧判断是否还在播，按 watch_upload_s 上传；静止或超时自动结束。"""
+        params = self.state.get("client") or {}
+        now = time.monotonic()
+        w = self.watch
+        if not w["since"]:
+            w.update(since=now, last_change=now, last_check=0.0, thumb=None)
+        requested = float(self.state.get("want_frame_after") or 0) > w["server_ts"]
+        due = now - w["last_upload"] >= float(params.get("watch_upload_s", 600))
+        if now - w["last_check"] < self.watch_check_s and not requested and not due:
+            return
+        if self.watch_capturer is None:
+            self.watch_capturer = Capturer(self.config["backend"], self.config["watch_monitor"])
+            log.info("副屏 %s 已就绪", self.config["watch_monitor"])
+        left, top, right, bottom = self.watch_capturer.bounds
+        center_process = process_at((left + right) // 2, (top + bottom) // 2)
+        if not process_allowed(center_process, [], self.config["deny_processes"]):
+            w["last_check"] = now
+            return  # 副屏中间是聊天等隐私窗口
+        image = self.watch_capturer.grab()
+        if image is None:
+            return
+        thumb = thumbnail(image)
+        change = change_ratio(w["thumb"], thumb)
+        w.update(last_check=now, thumb=thumb)
+        if change >= 0.02:
+            w["last_change"] = now
+        if now - w["last_change"] >= float(params.get("watch_static_stop_s", 900)):
+            log.info("副屏画面长时间不动，自动结束陪看")
+            return self.control("watch_off", source="auto")
+        if now - w["since"] >= float(params.get("watch_max_s", 10800)):
+            log.info("陪看达到最长时长，自动结束")
+            return self.control("watch_off", source="auto")
+        if not (requested or due):
+            return
+        jpeg = encode_jpeg(image, int(params.get("max_width", 1600)), int(params.get("jpeg_quality", 70)))
+        result = self.api.upload(jpeg, "request" if requested else "timer", change, center_process,
+                                 float(params.get("upload_kbps", 1500)), "watch",
+                                 source=f"{self.config['source']}-side")
+        w["last_upload"] = now
+        w["server_ts"] = float(result.get("frame_ts") or w["server_ts"])
+        self._accept_state(result.get("state") or self.state)
+        log.info("上传 watch %.0fKB 变化%.2f %s", len(jpeg) / 1024, change, center_process or "-")
 
     def _reset_capturer(self) -> None:
         try:
@@ -419,6 +489,9 @@ def run_tray(app: Companion) -> None:
         item("只在问时看", lambda: app.control("passive")),
         pystray.MenuItem(lambda _i: "日常也陪：开（点击关闭）" if app.state.get("daily") else "日常也陪：关（点击开启）",
                          lambda icon, _item: app.control("daily_off" if app.state.get("daily") else "daily_on")),
+        pystray.MenuItem(lambda _i: (f"陪看副屏：开（{app.config['hotkey_watch']} 关闭）" if app.state.get("watch")
+                                     else f"陪看副屏：关（{app.config['hotkey_watch']} 开启）"),
+                         lambda icon, _item: app.toggle_watch(), visible=bool(app.config.get("watch_monitor"))),
         pystray.Menu.SEPARATOR,
         item(f"让伙伴看一眼（{app.config['hotkey_look']}）", app.look_now),
         item(lambda _i: "恢复截图" if app.paused else f"暂停截图（{app.config['hotkey_pause']}）", app.toggle_pause),
@@ -444,6 +517,8 @@ def bind_hotkeys(app: Companion) -> None:
 
         keyboard.add_hotkey(app.config["hotkey_look"], app.look_now)
         keyboard.add_hotkey(app.config["hotkey_pause"], app.toggle_pause)
+        if app.config.get("watch_monitor"):
+            keyboard.add_hotkey(app.config["hotkey_watch"], app.toggle_watch)
     except Exception as exc:  # 没装 keyboard 或权限不足时不影响托盘
         log.warning("热键未启用：%s", exc)
 
