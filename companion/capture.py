@@ -24,6 +24,15 @@ class Foreground:
     title: str = ""
     process: str = ""
     rect: tuple[int, int, int, int] | None = None  # left, top, right, bottom（物理像素）
+    window_class: str = ""
+
+
+def is_shell_surface(fg: Foreground) -> bool:
+    """Notification overflow/taskbar surfaces are not the requested app window."""
+    return fg.window_class.casefold() in {
+        "shell_traywnd", "shell_secondarytraywnd", "notifyiconoverflowwindow",
+        "toplevelwindowforoverflowxamlisland", "controlcenterwindow",
+    }
 
 
 def enable_dpi_awareness() -> None:
@@ -49,6 +58,7 @@ def foreground() -> Foreground:
     user32.GetForegroundWindow.restype = wintypes.HWND
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     hwnd = user32.GetForegroundWindow()
@@ -66,7 +76,9 @@ def foreground() -> Foreground:
     rect = wintypes.RECT()
     ok = user32.GetWindowRect(hwnd, ctypes.byref(rect))
     box = (rect.left, rect.top, rect.right, rect.bottom) if ok else None
-    return Foreground(title=buffer.value, process=process, rect=box)
+    window_class = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, window_class, len(window_class))
+    return Foreground(title=buffer.value, process=process, rect=box, window_class=window_class.value)
 
 
 LOCK_PROCESSES = {"lockapp.exe", "logonui.exe"}

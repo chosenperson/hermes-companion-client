@@ -1,5 +1,6 @@
 """Transport/privacy regressions plus an isolated Windows instance-lock check."""
 import ctypes
+import hashlib
 import json
 import os
 import subprocess
@@ -192,6 +193,56 @@ def test_lock_screen_cannot_bypass_filter_with_pending_request(monkeypatch):
     app._ensure_capturer = Mock(side_effect=AssertionError('Must not initialize capture on lock screen'))
     app._capture_once()
     assert app.stats['uploads'] == 0
+
+
+@pytest.mark.parametrize('window_class', ['Shell_TrayWnd', 'Shell_SecondaryTrayWnd',
+                                        'NotifyIconOverflowWindow', 'TopLevelWindowForOverflowXamlIsland'])
+def test_tray_overflow_cannot_consume_look_request(monkeypatch, window_class):
+    app = make_app()
+    app.decider.hotkey_pending = True
+    fg = Foreground(process='explorer.exe', rect=(3000, 1500, 3400, 2100), window_class=window_class)
+    monkeypatch.setattr('companion.app.foreground', lambda: fg)
+    app._ensure_capturer = Mock(side_effect=AssertionError('System tray must not be captured'))
+    app._capture_once()
+    assert app.decider.hotkey_pending
+    assert app._scene(fg) is None
+    app.api.upload = Mock()
+    assert not capture.is_shell_surface(Foreground(process='explorer.exe', window_class='CabinetWClass'))
+
+
+def test_last_upload_evidence_is_exact_and_rejected_frame_does_not_replace_it(tmp_path, monkeypatch):
+    app = make_app()
+    app.config['last_upload_dir'] = str(tmp_path)
+    fg = Foreground(title='acceptance 4731', process='msedge.exe', rect=(0, 0, 100, 100))
+    monkeypatch.setattr('companion.app.foreground', lambda: fg)
+    app._scene = Mock(return_value='daily')
+    app.capturer = Mock()
+    app.capturer.grab.return_value = Image.new('RGB', (100, 100), 'red')
+    app.capturer.crop_to_window.side_effect = lambda image, window: image
+    app.api.upload = Mock(return_value={'accepted': True, 'frame_ts': 123, 'state': app.state})
+    app._capture_once()
+    sent = app.api.upload.call_args.args[0]
+    meta = json.loads((tmp_path / 'last-upload.json').read_text(encoding='utf-8'))
+    assert (tmp_path / meta['image']).read_bytes() == sent
+    assert meta['sha256'] == hashlib.sha256(sent).hexdigest()
+    assert meta['bytes'] == len(sent) and meta['process'] == 'msedge.exe'
+    app.capturer.grab.return_value = Image.new('RGB', (100, 100), 'blue')
+    app.api.upload.return_value['accepted'] = False
+    app._capture_once()
+    assert json.loads((tmp_path / 'last-upload.json').read_text(encoding='utf-8')) == meta
+    app.api.upload.return_value['accepted'] = True
+    app._capture_once()
+    updated = json.loads((tmp_path / 'last-upload.json').read_text(encoding='utf-8'))
+    assert updated['sha256'] != meta['sha256']
+    assert len(list(tmp_path.glob('*.jpg'))) == 1
+
+
+def test_archive_failure_does_not_break_successful_upload(tmp_path, monkeypatch, caplog):
+    app = make_app()
+    app.config['last_upload_dir'] = str(tmp_path / 'not-a-directory')
+    Path(app.config['last_upload_dir']).write_text('occupied')
+    app._save_last_upload(b'jpeg', Foreground(), 'daily', 'hotkey', 123)
+    assert '本地留存失败' in caplog.text
 
 
 @pytest.mark.parametrize('accepted', [True, False])

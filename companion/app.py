@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import ctypes
+from datetime import datetime
 import faulthandler
 import hashlib
 import json
@@ -28,7 +29,7 @@ from pathlib import Path
 import requests
 
 from . import __version__
-from .capture import Capturer, enable_dpi_awareness, foreground, idle_seconds, is_locked
+from .capture import Capturer, enable_dpi_awareness, foreground, idle_seconds, is_locked, is_shell_surface
 from .logic import (NON_GAME_PROCESSES, AutoSession, Decider, ThrottledReader, change_ratio, encode_jpeg,
                     looks_like_game, process_allowed, thumbnail)
 
@@ -53,6 +54,7 @@ DEFAULT_CONFIG = {
     "hotkey_look": "ctrl+alt+s",
     "hotkey_pause": "ctrl+alt+p",
     "proxy": "",
+    "last_upload_dir": "",  # Opt-in local evidence: exact last accepted payload and metadata.
 }
 FALLBACK_STATE = {"enabled": False, "mode": "auto", "want_frame_after": 0, "client": {}}
 
@@ -157,11 +159,13 @@ class Companion:
 
     # ---- 外部操作（托盘/热键）
     def look_now(self) -> None:
+        log.info("收到看一眼请求")
         self.decider.hotkey_pending = True
         self._wake.set()
 
     def toggle_pause(self) -> None:
         self.paused = not self.paused
+        log.info("本机暂停切换：%s", self.paused)
         self._set_status("本机已暂停截图" if self.paused else "已恢复")
 
     def _accept_state(self, state: dict) -> None:
@@ -169,6 +173,7 @@ class Companion:
         self.decider.update_state(time.monotonic(), state)
 
     def control(self, action: str, source: str = "manual") -> None:
+        log.info("控制请求：%s source=%s", action, source)
         if self.auto and source == "manual":
             self.auto.manual(time.monotonic(), action)
         try:
@@ -260,7 +265,7 @@ class Companion:
         """game=在玩游戏；daily=日常模式下人在电脑前；None=离开、锁屏、隐私窗口或日常关闭。"""
         cfg = self.config
         params = self.state.get("client") or {}
-        if is_locked(fg) or idle_seconds() >= float(params.get("daily_idle_s", 300)):
+        if is_locked(fg) or is_shell_surface(fg) or idle_seconds() >= float(params.get("daily_idle_s", 300)):
             return None
         if not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
             return None
@@ -294,7 +299,7 @@ class Companion:
     def _capture_once(self) -> None:
         cfg = self.config
         fg = foreground()
-        if is_locked(fg) or not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
+        if is_locked(fg) or is_shell_surface(fg) or not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
             self.stats["skipped_private"] += 1
             return
         self._ensure_capturer()
@@ -328,9 +333,40 @@ class Companion:
         self.decider.uploaded(time.monotonic(), thumb, result.get("frame_ts"), trigger)
         self.stats["uploads"] += 1
         self.stats["bytes"] += len(jpeg)
+        self._save_last_upload(jpeg, fg, scene, trigger, result.get("frame_ts"))
         log.info("上传 %s/%s %.0fKB 变化%.2f %s bytes=%d", scene or "-", trigger,
                  len(jpeg) / 1024, change, fg.process, len(jpeg))
         self._set_status(self._describe())
+
+    def _save_last_upload(self, jpeg: bytes, fg, scene, trigger, frame_ts) -> None:
+        directory = self.config.get("last_upload_dir")
+        if not directory:
+            return
+        try:
+            root = Path(directory)
+            root.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256(jpeg).hexdigest()
+            image_name = f"last-upload-{digest}.jpg"
+            image = root / image_name
+            temporary = root / "last-upload.tmp"
+            temporary.write_bytes(jpeg)
+            temporary.replace(image)
+            metadata = {
+                "saved_at": datetime.now().astimezone().isoformat(), "frame_ts": frame_ts,
+                "client_version": __version__, "image": image_name, "sha256": digest,
+                "bytes": len(jpeg), "process": fg.process, "title": fg.title,
+                "rect": fg.rect, "window_class": fg.window_class,
+                "monitor": self.config["monitor"], "scene": scene or "daily", "trigger": trigger,
+            }
+            temporary = root / "last-upload.json.tmp"
+            temporary.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(root / "last-upload.json")
+            for previous in root.glob("last-upload-*.jpg"):
+                if previous.name != image_name:
+                    previous.unlink()
+            log.info("已留存最后成功上传图 sha256=%s bytes=%d", digest, len(jpeg))
+        except OSError:
+            log.exception("最后上传图本地留存失败（远端上传已成功）")
 
 
 # ---------------------------------------------------------------- 托盘与热键
@@ -354,8 +390,13 @@ def run_tray(app: Companion) -> None:
         class WindowsIcon(pystray.Icon):
             def _on_notify(self, wparam, lparam):
                 if lparam == 0x0205:  # WM_RBUTTONUP, before TrackPopupMenuEx opens the menu.
+                    log.info("托盘菜单打开")
                     self.update_menu()
-                return super()._on_notify(wparam, lparam)
+                try:
+                    return super()._on_notify(wparam, lparam)
+                finally:
+                    if lparam == 0x0205:
+                        log.info("托盘菜单关闭")
 
         icon_class = WindowsIcon
 
@@ -365,7 +406,10 @@ def run_tray(app: Companion) -> None:
         return "#d9a400" if app.paused else "#2e9d5b"
 
     def item(text, action, **kw):
-        return pystray.MenuItem(text, lambda icon, _item: action(), **kw)
+        def invoke(icon, descriptor):
+            log.info("托盘操作：%s", descriptor.text)
+            return action()
+        return pystray.MenuItem(text, invoke, **kw)
 
     menu = pystray.Menu(
         pystray.MenuItem(lambda _i: app.status, None, enabled=False),

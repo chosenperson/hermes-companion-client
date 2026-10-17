@@ -11,3 +11,4 @@ dist/
 *.webp
 companion.log*
 companion-stall.log
+last-upload/
