@@ -119,3 +119,71 @@ class ThrottledReader(io.RawIOBase):
         if ahead > 0:
             self._sleep(ahead)
         return piece
+
+
+# 铺满屏幕也不当作游戏的常见程序（浏览器、桌面、编辑器、办公、播放器、系统界面）
+NON_GAME_PROCESSES = [
+    "explorer.exe", "msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe",
+    "code.exe", "cursor.exe", "devenv.exe", "idea64.exe", "pycharm64.exe", "windowsterminal.exe", "cmd.exe",
+    "powershell.exe", "pwsh.exe", "notepad.exe", "notepad++.exe", "winword.exe", "excel.exe", "powerpnt.exe",
+    "acrobat.exe", "obsidian.exe", "siyuan.exe", "potplayermini64.exe", "potplayer.exe", "vlc.exe", "mpv.exe",
+    "applicationframehost.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe",
+    "lockapp.exe", "textinputhost.exe", "systemsettings.exe", "taskmgr.exe", "steamwebhelper.exe",
+    "steam.exe", "epicgameslauncher.exe", "wegame.exe",
+]
+
+
+def looks_like_game(process: str, covers_monitor: bool, allow: Iterable[str], deny: Iterable[str],
+                    non_game: Iterable[str]) -> bool:
+    """白名单非空时只认名单；否则前台窗口铺满陪玩屏且不是常见非游戏程序就当作在玩游戏。"""
+    name = (process or "").lower()
+    if not name or not process_allowed(name, allow, deny):
+        return False
+    if any(True for _ in allow):
+        return True
+    return covers_monitor and name not in {n.lower() for n in non_game}
+
+
+@dataclass
+class AutoSession:
+    """进游戏自动开陪玩，离开游戏一段时间自动关；只关自己开的那一次，尊重用户手动结束。"""
+
+    stop_after_s: float = 600
+    active: bool = False            # 当前陪玩是否由自动开启
+    confirmed: bool = False         # 自动开启后服务端已确认开启（区分“开启失败”与“用户手动结束”）
+    suppressed: str = ""            # 用户手动结束时正在玩的游戏：退出它之前不再自动开
+    last_game: float = 0.0
+    last_game_process: str = ""
+
+    def observe(self, now: float, enabled: bool, process: str, is_game: bool) -> str | None:
+        name = (process or "").lower()
+        if is_game:
+            self.last_game = now
+            self.last_game_process = name
+        if self.active and enabled:
+            self.confirmed = True
+        if self.active and not enabled and not self.confirmed:
+            return "start" if is_game else None  # 上次开启没成功（如断网），继续尝试
+        if self.active and not enabled:
+            # 飞书或托盘已手动结束
+            self.active = False
+            self.suppressed = self.last_game_process if now - self.last_game < 30 else ""
+            return None
+        if self.suppressed:
+            left_game = not is_game and now - self.last_game >= self.stop_after_s
+            if left_game or (is_game and name != self.suppressed):
+                self.suppressed = ""
+        if is_game and not enabled and name != self.suppressed:
+            self.active, self.confirmed = True, False
+            return "start"
+        if self.active and enabled and not is_game and now - self.last_game >= self.stop_after_s:
+            self.active = False
+            return "stop"
+        return None
+
+    def manual(self, now: float, action: str) -> None:
+        if action == "stop":
+            self.active = False
+            self.suppressed = self.last_game_process if now - self.last_game < 30 else ""
+        elif action == "start":
+            self.active = False  # 手动开的不自动关

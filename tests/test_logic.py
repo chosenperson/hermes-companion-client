@@ -119,3 +119,44 @@ def test_end_to_end_with_receiver(tmp_path):
     finally:
         proc.terminate()
         proc.wait(5)
+
+
+def test_looks_like_game():
+    from companion.logic import NON_GAME_PROCESSES, looks_like_game
+    deny = ["WeChat.exe"]
+    assert looks_like_game("eldenring.exe", True, [], deny, NON_GAME_PROCESSES)
+    assert not looks_like_game("eldenring.exe", False, [], deny, NON_GAME_PROCESSES)   # 没铺满屏
+    assert not looks_like_game("msedge.exe", True, [], deny, NON_GAME_PROCESSES)       # 全屏浏览器
+    assert not looks_like_game("WeChat.exe", True, [], deny, NON_GAME_PROCESSES)
+    assert looks_like_game("sts.exe", False, ["sts.exe"], deny, NON_GAME_PROCESSES)    # 白名单不要求铺满
+    assert not looks_like_game("other.exe", True, ["sts.exe"], deny, NON_GAME_PROCESSES)
+
+
+def test_auto_session_lifecycle():
+    from companion.logic import AutoSession
+    a = AutoSession(stop_after_s=600)
+    assert a.observe(0, False, "explorer.exe", False) is None
+    assert a.observe(3, False, "game.exe", True) == "start"
+    assert a.observe(6, True, "game.exe", True) is None
+    assert a.observe(60, True, "msedge.exe", False) is None       # 切出去看攻略，不关
+    assert a.observe(605, True, "msedge.exe", False) is None      # 距最后见到游戏还不到 600 秒
+    assert a.observe(610, True, "msedge.exe", False) == "stop"
+    assert not a.active
+
+
+def test_auto_session_respects_manual_stop_and_manual_start():
+    from companion.logic import AutoSession
+    a = AutoSession(stop_after_s=600)
+    assert a.observe(0, False, "game.exe", True) == "start"
+    assert a.observe(3, False, "game.exe", True) == "start"        # 开启没成功（断网）继续尝试
+    assert a.observe(6, True, "game.exe", True) is None
+    assert a.observe(10, False, "game.exe", True) is None          # 飞书里说了结束：不再自动开
+    assert a.observe(20, False, "game.exe", True) is None
+    assert a.observe(30, False, "other_game.exe", True) == "start" # 换了游戏重新自动开
+    a.manual(31, "stop")
+    assert a.observe(40, False, "other_game.exe", True) is None
+    assert a.observe(700, False, "explorer.exe", False) is None    # 退出游戏 ≥600 秒，解除
+    assert a.observe(703, False, "other_game.exe", True) == "start"
+    b = AutoSession(stop_after_s=600)
+    b.manual(0, "start")                                           # 手动开的不自动关
+    assert b.observe(1000, True, "explorer.exe", False) is None

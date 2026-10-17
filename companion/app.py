@@ -26,7 +26,8 @@ import requests
 
 from . import __version__
 from .capture import Capturer, enable_dpi_awareness, foreground
-from .logic import Decider, ThrottledReader, change_ratio, encode_jpeg, process_allowed, thumbnail
+from .logic import (NON_GAME_PROCESSES, AutoSession, Decider, ThrottledReader, change_ratio, encode_jpeg,
+                    looks_like_game, process_allowed, thumbnail)
 
 log = logging.getLogger("companion")
 
@@ -43,6 +44,9 @@ DEFAULT_CONFIG = {
         "DingTalk.exe", "Outlook.exe", "olk.exe", "KeePass.exe", "KeePassXC.exe", "1Password.exe",
         "Bitwarden.exe", "mstsc.exe",
     ],
+    "auto_session": True,
+    "auto_stop_after_s": 600,
+    "non_game_processes": NON_GAME_PROCESSES,
     "hotkey_look": "ctrl+alt+s",
     "hotkey_pause": "ctrl+alt+p",
     "proxy": "",
@@ -107,12 +111,14 @@ class Companion:
     def __init__(self, config: dict):
         self.config = config
         self.api = Api(config)
-        self.capturer: Capturer | None = None  # 在截图线程里创建：Windows GDI 句柄不能跨线程用
+        self.capturer: Capturer | None = None
+        self._last_auto = 0.0  # 在截图线程里创建：Windows GDI 句柄不能跨线程用
         self.decider = Decider()
         self.state = dict(FALLBACK_STATE)
         self.paused = False
         self.status = "启动中"
         self.stats = {"uploads": 0, "bytes": 0, "skipped_private": 0}
+        self.auto = AutoSession(stop_after_s=float(config["auto_stop_after_s"])) if config["auto_session"] else None
         self.heartbeat = time.monotonic()
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -131,7 +137,9 @@ class Companion:
         self.state = state
         self.decider.update_state(time.monotonic(), state)
 
-    def control(self, action: str) -> None:
+    def control(self, action: str, source: str = "manual") -> None:
+        if self.auto and source == "manual":
+            self.auto.manual(time.monotonic(), action)
         try:
             self._accept_state(self.api.control(action))
             self._set_status(self._describe())
@@ -192,12 +200,39 @@ class Companion:
                     log.exception("截图/上传失败")
                     self._set_status(f"截图/上传失败：{type(exc).__name__}: {exc}")
                     self._reset_capturer()
-            elif self.decider.hotkey_pending:
+            elif self.decider.hotkey_pending and self.paused:
                 self.decider.hotkey_pending = False
-                self._set_status("陪玩未开启或已暂停，热键忽略")
+                self._set_status("本机已暂停截图，热键忽略")
+            elif self.decider.hotkey_pending:
+                log.info("热键开启陪玩")
+                self.control("start")  # 保留 hotkey_pending，下一轮带 hotkey 上传
+                continue
+            if self.auto and not self.paused and time.monotonic() - self._last_auto >= 3:
+                self._last_auto = time.monotonic()
+                try:
+                    self._auto_check()
+                except Exception:
+                    log.exception("自动陪玩检测失败")
             interval = float(params.get("capture_interval_s", 3)) if self.state.get("enabled") else 1.0
             self._wake.wait(interval)
             self._wake.clear()
+
+    def _ensure_capturer(self) -> Capturer:
+        if self.capturer is None:
+            self.capturer = Capturer(self.config["backend"], self.config["monitor"])
+            log.info("截图后端 %s 显示器 %s 已就绪", self.config["backend"], self.config["monitor"])
+        return self.capturer
+
+    def _auto_check(self) -> None:
+        cfg = self.config
+        fg = foreground()
+        covers = self._ensure_capturer().covers_monitor(fg)
+        is_game = looks_like_game(fg.process, covers, cfg["allow_processes"], cfg["deny_processes"],
+                                  cfg["non_game_processes"])
+        action = self.auto.observe(time.monotonic(), bool(self.state.get("enabled")), fg.process, is_game)
+        if action:
+            log.info("自动%s陪玩（%s）", "开启" if action == "start" else "结束", fg.process or "无游戏")
+            self.control(action, source="auto")
 
     def _reset_capturer(self) -> None:
         try:
@@ -209,9 +244,7 @@ class Companion:
 
     def _capture_once(self) -> None:
         cfg = self.config
-        if self.capturer is None:
-            self.capturer = Capturer(cfg["backend"], cfg["monitor"])
-            log.info("截图后端 %s 显示器 %s 已就绪", cfg["backend"], cfg["monitor"])
+        self._ensure_capturer()
         fg = foreground()
         if not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
             self.stats["skipped_private"] += 1

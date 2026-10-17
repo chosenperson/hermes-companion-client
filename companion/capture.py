@@ -124,6 +124,14 @@ class Capturer:
         cy = (fg.rect[1] + fg.rect[3]) / 2
         return left <= cx < right and top <= cy < bottom
 
+    def covers_monitor(self, fg: Foreground, slack: int = 8) -> bool:
+        """前台窗口是否铺满所选显示器（全屏或无边框窗口）。"""
+        if not fg.rect or not self.window_on_monitor(fg):
+            return False
+        left, top, right, bottom = self.bounds
+        return (fg.rect[0] <= left + slack and fg.rect[1] <= top + slack
+                and fg.rect[2] >= right - slack and fg.rect[3] >= bottom - slack)
+
     def crop_to_window(self, image: Image.Image, fg: Foreground) -> Image.Image:
         """裁成前台窗口区域，同屏其它窗口不外传。"""
         if not fg.rect:
