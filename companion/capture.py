@@ -25,6 +25,9 @@ class Foreground:
     process: str = ""
     rect: tuple[int, int, int, int] | None = None  # left, top, right, bottom（物理像素）
     window_class: str = ""
+    style: int = 0
+    ex_style: int = 0
+    has_owner: bool = False
 
 
 def is_shell_surface(fg: Foreground) -> bool:
@@ -33,6 +36,36 @@ def is_shell_surface(fg: Foreground) -> bool:
         "shell_traywnd", "shell_secondarytraywnd", "notifyiconoverflowwindow",
         "toplevelwindowforoverflowxamlisland", "controlcenterwindow",
     }
+
+
+def is_transient_window(fg: Foreground) -> bool:
+    """Skip shell/menu/tool surfaces without rejecting normal small app windows."""
+    if is_shell_surface(fg) or fg.window_class.casefold() in {
+        "#32768", "tooltips_class32", "sysshadow", "tasklistthumbnailwnd",
+        "xaml_windowedpopupclass", "ime", "msctfime ui",
+    }:
+        return True
+    if fg.process.casefold() == "xboxpctray.exe":
+        return True  # This process owns the Xbox tray flyout, not the Xbox app/game.
+    if fg.ex_style & 0x00000080 and not fg.ex_style & 0x00040000:  # TOOLWINDOW, not APPWINDOW.
+        return True
+    # Owned borderless popup surfaces are menus/flyouts; an unowned borderless
+    # game or a normal captioned dialog remains eligible regardless of size.
+    return bool(fg.has_owner and fg.style & 0x80000000
+                and fg.style & 0x00C00000 != 0x00C00000
+                and not fg.ex_style & 0x00040000)
+
+
+def window_attributes(hwnd: int) -> tuple[int, int, bool]:
+    """Read window flags/owner using pointer-sized Win32 declarations."""
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    get_long = user32.GetWindowLongPtrW if ctypes.sizeof(ctypes.c_void_p) == 8 else user32.GetWindowLongW
+    get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+    get_long.restype = ctypes.c_ssize_t
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindow.restype = wintypes.HWND
+    return get_long(hwnd, -16) & 0xFFFFFFFF, get_long(hwnd, -20) & 0xFFFFFFFF, bool(user32.GetWindow(hwnd, 4))
 
 
 def enable_dpi_awareness() -> None:
@@ -78,7 +111,9 @@ def foreground() -> Foreground:
     box = (rect.left, rect.top, rect.right, rect.bottom) if ok else None
     window_class = ctypes.create_unicode_buffer(256)
     user32.GetClassNameW(hwnd, window_class, len(window_class))
-    return Foreground(title=buffer.value, process=process, rect=box, window_class=window_class.value)
+    style, ex_style, has_owner = window_attributes(hwnd)
+    return Foreground(title=buffer.value, process=process, rect=box, window_class=window_class.value,
+                      style=style, ex_style=ex_style, has_owner=has_owner)
 
 
 LOCK_PROCESSES = {"lockapp.exe", "logonui.exe"}
@@ -179,6 +214,10 @@ class Capturer:
         if frame is not None:
             self._last = Image.fromarray(frame)
         return self._last
+
+    def discard_last_frame(self) -> None:
+        """A frame rejected after a window switch must not be reused by DXCAM."""
+        self._last = None
 
     def window_on_monitor(self, fg: Foreground) -> bool:
         """前台窗口中心是否落在所选显示器上（只陪这块屏幕上的游戏）。"""

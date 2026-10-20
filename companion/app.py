@@ -30,7 +30,7 @@ from pathlib import Path
 import requests
 
 from . import __version__
-from .capture import Capturer, Foreground, enable_dpi_awareness, foreground, idle_seconds, is_locked, process_at, is_shell_surface
+from .capture import Capturer, Foreground, enable_dpi_awareness, foreground, idle_seconds, is_locked, process_at, is_transient_window
 from .logic import (NON_GAME_PROCESSES, AutoSession, Decider, ThrottledReader, change_ratio, changed_fraction,
                     encode_jpeg,
                     looks_like_game, process_allowed, thumbnail)
@@ -294,7 +294,7 @@ class Companion:
         """game=在玩游戏；daily=日常模式下人在电脑前；None=离开、锁屏、隐私窗口或日常关闭。"""
         cfg = self.config
         params = self.state.get("client") or {}
-        if is_locked(fg) or is_shell_surface(fg) or idle_seconds() >= float(params.get("daily_idle_s", 300)):
+        if is_locked(fg) or is_transient_window(fg) or idle_seconds() >= float(params.get("daily_idle_s", 300)):
             return None
         if not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
             return None
@@ -406,7 +406,7 @@ class Companion:
     def _capture_once(self) -> None:
         cfg = self.config
         fg = foreground()
-        if is_locked(fg) or is_shell_surface(fg) or not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
+        if is_locked(fg) or is_transient_window(fg) or not process_allowed(fg.process, cfg["allow_processes"], cfg["deny_processes"]):
             self.stats["skipped_private"] += 1
             return
         self._ensure_capturer()
@@ -423,7 +423,9 @@ class Companion:
             image = self.capturer.crop_to_window(image, fg)
         latest = foreground()
         if (latest.process.lower() != fg.process.lower() or latest.rect != fg.rect
-                or latest.title != fg.title or is_locked(latest)):
+                or latest.title != fg.title or latest.window_class != fg.window_class
+                or is_locked(latest) or is_transient_window(latest)):
+            self.capturer.discard_last_frame()
             return  # Foreground changed during capture: discard rather than upload another window.
         thumb = thumbnail(image)
         change = change_ratio(self.decider.last_thumb, thumb)
